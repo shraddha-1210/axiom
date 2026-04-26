@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 credentials.md
+youtube_client_secret.json
 *.pem
 *.key
 
