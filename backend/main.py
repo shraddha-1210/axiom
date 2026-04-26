@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import requests
@@ -12,6 +12,10 @@ from scrapers import orchestrator
 
 from database import SessionLocal, AssetRecord, IncidentRecord
 import vector_store
+
+from waf import CloudArmorMiddleware, limiter
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 app = FastAPI(
     title="AXIOM MVP API ($0 Hacker Stack Edition)",
@@ -29,6 +33,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Layer 1 - WAF Simulation (Rate Limiter and IP block)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(CloudArmorMiddleware)
+
 os.makedirs("/tmp/media", exist_ok=True)
 
 @app.get("/health")
@@ -36,13 +45,17 @@ def health_check():
     return {"status": "ok", "environment": os.getenv("ENVIRONMENT")}
 
 @app.post("/api/upload-source")
-async def upload_source(asset_id: str, uploader: str, file: UploadFile = File(...)):
+@limiter.limit("5/minute")
+async def upload_source(request: Request, asset_id: str, uploader: str, file: UploadFile = File(...)):
     """Layer 1 - Provenance: Secure File Uploads and local C2PA Manifest Signing."""
     filepath = f"/tmp/media/{file.filename}"
     with open(filepath, "wb") as buffer:
         buffer.write(await file.read())
         
     manifest, signature = c2pa_engine.create_and_sign_manifest(filepath, asset_id, uploader)
+    
+    # Extract file hash from manifest assertions
+    file_hash = next((a["data"]["hash"] for a in manifest["assertions"] if a["label"] == "c2pa.hash.data"), None)
     
     # Store manifest in NeonDB PostgreSQL
     db = SessionLocal()
@@ -51,7 +64,7 @@ async def upload_source(asset_id: str, uploader: str, file: UploadFile = File(..
             id=asset_id,
             owner_id=uploader,
             c2pa_manifest=manifest,
-            file_hash=manifest["file_sha256"]
+            file_hash=file_hash
         )
         db.add(new_asset)
         db.commit()

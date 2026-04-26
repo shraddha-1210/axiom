@@ -26,11 +26,43 @@ class LocalC2PA:
         file_hash = self.generate_file_hash(filepath)
         
         manifest = {
-            "asset_id": asset_id,
-            "uploader": uploader_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "file_sha256": file_hash,
-            "algorithm": "Local-RSA-2048-MVP"
+            "claim_generator": "SentinelMedia Local HSM MVP",
+            "claim_generator_info": [
+                {"name": "SentinelMedia Provenance Node", "version": "2.0"}
+            ],
+            "title": f"Asset {asset_id}",
+            "instance_id": f"xmp:iid:{asset_id}",
+            "ingredients": [],
+            "assertions": [
+                {
+                    "label": "c2pa.actions",
+                    "data": {
+                        "actions": [
+                            {"action": "c2pa.created"}
+                        ]
+                    }
+                },
+                {
+                    "label": "c2pa.hash.data",
+                    "data": {
+                        "exclusions": [],
+                        "alg": "sha256",
+                        "hash": file_hash
+                    }
+                },
+                {
+                    "label": "stml.provenance.metadata",
+                    "data": {
+                        "uploader": uploader_id,
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                }
+            ],
+            "signature_info": {
+                "algorithm": "RSASSA-PSS",
+                "hashing": "SHA-256",
+                "issuer": "SentinelMedia Local Root"
+            }
         }
         
         manifest_bytes = json.dumps(manifest, sort_keys=True).encode('utf-8')

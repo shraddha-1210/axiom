@@ -70,6 +70,44 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 /* -------------------------------------------------------------------------- */
 function EnterpriseDashboard({ onLogout, theme, setTheme }: { onLogout: () => void, theme: string, setTheme: (v: string) => void }) {
   const [activeTab, setActiveTab] = useState('command_center');
+  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'error' | 'success'>('idle');
+  const [wafError, setWafError] = useState('');
+  const [manifestData, setManifestData] = useState<any>(null);
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      setUploadState('uploading');
+      setWafError('');
+      
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+          const res = await fetch(`http://localhost:8000/api/upload-source?asset_id=ui_${Date.now()}&uploader=soc_admin`, {
+              method: 'POST',
+              body: formData
+          });
+          const data = await res.json();
+          if (res.status === 429) {
+              setWafError('WAF Blocked: Rate Limit Exceeded');
+              setUploadState('error');
+          } else if (res.status === 403) {
+              setWafError(`WAF Blocked: ${data.detail}`);
+              setUploadState('error');
+          } else if (res.ok) {
+              setManifestData(data.manifest);
+              setUploadState('success');
+          } else {
+              setWafError(data.error || 'Server Error');
+              setUploadState('error');
+          }
+      } catch (err) {
+          setWafError('Network Error');
+          setUploadState('error');
+      }
+  };
   
   return (
     <div className="enterprise-layout">
@@ -179,11 +217,24 @@ function EnterpriseDashboard({ onLogout, theme, setTheme }: { onLogout: () => vo
                 <div className="panel">
                   <div className="panel-header">Direct Escalation</div>
                   <div style={{ padding: '1.5rem' }}>
-                    <div className="upload-box">
-                      <Download size={24} style={{ color: 'var(--accent)', marginBottom: '1rem' }} />
-                      <div style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-main)' }}>Upload Suspicious Asset</div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>MP4/AVI maximum 50MB</div>
-                    </div>
+                    <label className="upload-box" style={{ cursor: 'pointer', display: 'block' }}>
+                      <input type="file" style={{ display: 'none' }} onChange={handleUpload} accept="video/mp4,video/avi" />
+                      <Download size={24} style={{ color: 'var(--accent)', marginBottom: '1rem', display: 'block', margin: '0 auto' }} />
+                      <div style={{ fontSize: '0.85rem', fontWeight: 500, color: 'var(--text-main)', textAlign: 'center', marginTop: '1rem' }}>
+                        {uploadState === 'uploading' ? 'Analyzing via Layer 1 WAF...' : 'Upload Suspicious Asset'}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem', textAlign: 'center' }}>MP4/AVI maximum 50MB</div>
+                    </label>
+                    {uploadState === 'error' && (
+                        <div style={{ marginTop: '1rem', padding: '0.75rem', background: 'rgba(255,100,100,0.1)', color: 'var(--threat-high)', fontSize: '0.85rem', borderRadius: '4px', border: '1px solid var(--threat-high)' }}>
+                            {wafError}
+                        </div>
+                    )}
+                    {uploadState === 'success' && manifestData && (
+                        <div style={{ marginTop: '1rem', padding: '0.75rem', background: 'rgba(50,255,150,0.1)', color: 'var(--threat-low)', fontSize: '0.85rem', borderRadius: '4px', border: '1px solid var(--threat-low)' }}>
+                            ✔ Upload passed WAF.<br/>Cryptographic Manifest Generated: <br/><b>{manifestData.signature_info?.issuer || manifestData.claim_generator}</b>
+                        </div>
+                    )}
                   </div>
                 </div>
               </div>
