@@ -3,6 +3,7 @@ uvicorn==0.27.1
 ffmpeg-python==0.2.0
 imagehash==4.3.1
 Pillow==10.2.0
+numpy==1.26.4
 google-generativeai==0.3.2
 python-multipart==0.0.9
 python-dotenv==1.0.1
@@ -15,3 +16,4 @@ psycopg2-binary==2.9.9
 pinecone-client==3.2.2
 redis==5.0.1
 slowapi==0.1.9
+requests==2.31.0
