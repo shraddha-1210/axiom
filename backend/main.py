@@ -18,6 +18,7 @@ from paligemma_triage import run_paligemma_triage, PaliGemmaDecision
 from gemini_interrogator import analyze_video_frames_for_fraud
 from scrapers import orchestrator
 from event_queue import event_queue
+from sandbox_detonator import run_zeroday_sandbox
 
 from database import SessionLocal, AssetRecord, IncidentRecord
 import vector_store
@@ -210,6 +211,28 @@ def run_paligemma(video_filename: str, osint_context: Dict = None):
         "details": paligemma_result.details
     }
 
+@app.post("/api/sandbox")
+def run_sandbox(filename: str):
+    """
+    Layer 2.5 - Zero-day Sandbox Quarantine.
+    Detonates files matching unknown/suspicious formats using mock YARA/ClamAV.
+    """
+    filepath = f"/tmp/media/{filename}"
+    if not os.path.exists(filepath):
+        return {"error": "File not found locally"}
+
+    result = run_zeroday_sandbox(filepath)
+    
+    return {
+        "message": f"Sandbox Complete: {'SAFE' if result.is_safe else 'QUARANTINE'}",
+        "is_safe": result.is_safe,
+        "threat_name": result.threat_name,
+        "yara_hits": result.yara_hits,
+        "clamav_status": result.clamav_status,
+        "behavior_log": result.behavior_log,
+        "cost": f"${result.cost:.6f}"
+    }
+
 @app.post("/api/interrogate")
 def interrogate(asset_id: str, context: str = ""):
     """Layer 3 - Gemini: Interrogation and logging incidents into Neon DB."""
@@ -336,6 +359,34 @@ async def run_automated_pipeline(video_filename: str, asset_id: str = None, osin
     
     total_cost = 0.0
     pipeline_log = []
+    
+    video_ext = os.path.splitext(video_filename)[1].lower()
+    if video_ext not in [".mp4", ".mov", ".avi", ".mkv"]:
+        print("\n" + "="*60)
+        print("AUTOMATED PIPELINE: Unknown Format - Routing to Zero-day Sandbox")
+        print("="*60)
+        
+        sandbox_res = run_zeroday_sandbox(filepath)
+        total_cost += sandbox_res.cost
+        
+        pipeline_log.append({
+            "layer": "Layer 2.5 - Zero-day Sandbox",
+            "decision": "SAFE" if sandbox_res.is_safe else "QUARANTINE",
+            "cost": sandbox_res.cost,
+            "details": {
+                "threat_name": sandbox_res.threat_name,
+                "yara_hits": sandbox_res.yara_hits,
+                "clamav_status": sandbox_res.clamav_status
+            }
+        })
+        
+        if not sandbox_res.is_safe:
+            return {
+                "message": f"QUARANTINED: Zero-day Sandbox Exception ({sandbox_res.threat_name})",
+                "action": "QUARANTINE",
+                "total_cost": f"${total_cost:.6f}",
+                "pipeline_log": pipeline_log
+            }
     
     # LAYER 2: Triage
     print("\n" + "="*60)
