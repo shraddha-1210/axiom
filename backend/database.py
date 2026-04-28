@@ -24,7 +24,21 @@ elif DATABASE_URL.startswith("postgresql://"):
         print("⚠ psycopg2 not installed, using SQLite fallback for local development")
         DATABASE_URL = "sqlite:///./axiom.db"
 
-engine = create_engine(DATABASE_URL)
+# Layer 4: connection resilience
+# pool_pre_ping: test every connection before use (detects NeonDB auto-suspends)
+# pool_recycle: drop connections older than 5 minutes (NeonDB serverless timeout)
+# connect_args: sets a 10-second socket-level connect timeout so health checks fail fast
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_size=5,
+        max_overflow=10,
+        connect_args={"connect_timeout": 10},
+    )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

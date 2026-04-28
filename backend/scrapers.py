@@ -38,10 +38,19 @@ class ScraperOrchestrator:
         self.yt_client_id = os.getenv("YOUTUBE_CLIENT_ID")
         self.reddit_key = os.getenv("REDDIT_API_KEY")
 
-    def run_all(self):
+    def run_all(self, platform=None):
         results = []
-        results.extend(scrape_youtube(["leaked", "deepfake"]))
-        results.extend(scrape_reddit(["cricket", "soccer"]))
+        if not platform or platform == "youtube":
+            results.extend(scrape_youtube(["leaked", "deepfake"]))
+        if not platform or platform == "reddit":
+            results.extend(scrape_reddit(["cricket", "soccer"]))
+        if platform == "telegram":
+            time.sleep(1)
+            results.extend([{
+                "platform": "telegram",
+                "url": "https://t.me/mock",
+                "context": "Pirated stream link"
+            }])
         return results
 
 orchestrator = ScraperOrchestrator()
