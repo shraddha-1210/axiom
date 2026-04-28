@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Request
+from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
 import os
@@ -7,6 +7,11 @@ import pathlib
 import requests
 import json
 import base64
+import logging
+import tempfile
+
+logger = logging.getLogger("AXIOM")
+DEBUG = os.getenv("DEBUG_CLOUD_CALLS", "false").lower() == "true"
 
 from provenance import c2pa_engine
 from triage import (
@@ -30,6 +35,26 @@ import vector_store
 from waf import CloudArmorMiddleware, limiter
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+
+# Cloud-only imports (no local system interactions)
+try:
+    from cloud_client import (
+        analyze_frame_cloud,
+        detect_deepfake_signals_cloud,
+        detect_compression_artifacts_cloud,
+        generate_frame_caption_cloud,
+        check_colab_health,
+        CloudAnalysisResult
+    )
+    CLOUD_CLIENT_AVAILABLE = True
+except ImportError:
+    CLOUD_CLIENT_AVAILABLE = False
+    print("⚠ Cloud client not available - cloud endpoints will be disabled")
+
+try:
+    from cloud_embeddings import generate_multimodal_embedding
+except ImportError:
+    from vertex_embedder import generate_multimodal_embedding
 
 app = FastAPI(
     title="AXIOM MVP API ($0 Hacker Stack Edition)",
@@ -57,6 +82,184 @@ os.makedirs("/tmp/media", exist_ok=True)
 @app.get("/health")
 def health_check():
     return {"status": "ok", "environment": os.getenv("ENVIRONMENT")}
+
+
+@app.get("/cloud/health")
+def cloud_health_check():
+    """
+    Check if Colab ngrok tunnel is reachable.
+    
+    Returns cloud connectivity status.
+    """
+    if not CLOUD_CLIENT_AVAILABLE:
+        return {
+            "status": "unavailable",
+            "error": "Cloud client not installed"
+        }
+    
+    is_healthy = check_colab_health()
+    return {
+        "status": "ok" if is_healthy else "unavailable",
+        "colab_ngrok_url": os.getenv("COLAB_NGROK_URL", "not configured"),
+        "cloud_ready": is_healthy
+    }
+
+
+@app.post("/analyze-frame")
+@limiter.limit("20/minute")
+async def analyze_frame(
+    request: Request,
+    file: UploadFile = File(...),
+    prompt: str = "caption en"
+):
+    """
+    ☁️ CLOUD-ONLY Frame Analysis via Colab ngrok endpoint.
+    
+    No local system interaction — all processing happens on Google Colab T4 GPU.
+    
+    Supports:
+    - Automatic image caption generation (prompt="caption en")
+    - Deepfake detection (prompt="Is this a deepfake?...")
+    - Compression artifact analysis
+    - Logo manipulation detection
+    
+    Args:
+        file:   JPEG/PNG image file
+        prompt: Analysis prompt for PaliGemma model
+    
+    Returns:
+        Analysis result from Colab endpoint
+    """
+    if not CLOUD_CLIENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Cloud client not configured")
+    
+    try:
+        # Read image bytes from upload
+        image_bytes = await file.read()
+        
+        if DEBUG:
+            logger.info(f"📤 Uploading frame to Colab for analysis (prompt: {prompt})")
+        
+        # Send to Colab ngrok endpoint
+        result = analyze_frame_cloud(
+            image_bytes=image_bytes,
+            prompt=prompt,
+            retry=True
+        )
+        
+        if result.status == "error":
+            raise HTTPException(status_code=502, detail=f"Colab analysis failed: {result.error}")
+        
+        return {
+            "status": "success",
+            "analysis": result.analysis,
+            "processing_time_ms": f"{result.processing_time_ms:.1f}",
+            "model": "PaliGemma-3B (Colab T4 GPU)",
+            "cost": "$0.00"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Frame analysis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cloud/deepfake-detection")
+@limiter.limit("10/minute")
+async def cloud_deepfake_detection(
+    request: Request,
+    file: UploadFile = File(...)
+):
+    """
+    ☁️ Deepfake Detection via Colab PaliGemma.
+    
+    Analyzes frame for:
+    - Temporal flickering on face boundaries
+    - Facial feature inconsistencies
+    - Unnatural blinking patterns
+    - Skin texture anomalies
+    
+    Returns forensic analysis result.
+    """
+    if not CLOUD_CLIENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Cloud client not configured")
+    
+    try:
+        image_bytes = await file.read()
+        
+        # Save temporarily for cloud analysis
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        
+        result = detect_deepfake_signals_cloud(tmp_path)
+        os.unlink(tmp_path)
+        
+        if result.status == "error":
+            raise HTTPException(status_code=502, detail=f"Detection failed: {result.error}")
+        
+        return {
+            "status": "success",
+            "deepfake_analysis": result.analysis,
+            "processing_time_ms": f"{result.processing_time_ms:.1f}",
+            "model": "PaliGemma-3B (Colab)",
+            "cost": "$0.00"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Deepfake detection error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cloud/compression-artifacts")
+@limiter.limit("10/minute")
+async def cloud_compression_analysis(
+    request: Request,
+    file: UploadFile = File(...)
+):
+    """
+    ☁️ Compression Artifact Analysis via Colab.
+    
+    Detects:
+    - DCT blockiness patterns
+    - Color banding
+    - Edge irregularities
+    - Lossy compression signatures
+    """
+    if not CLOUD_CLIENT_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Cloud client not configured")
+    
+    try:
+        image_bytes = await file.read()
+        
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp.write(image_bytes)
+            tmp_path = tmp.name
+        
+        result = detect_compression_artifacts_cloud(tmp_path)
+        os.unlink(tmp_path)
+        
+        if result.status == "error":
+            raise HTTPException(status_code=502, detail=f"Analysis failed: {result.error}")
+        
+        return {
+            "status": "success",
+            "compression_analysis": result.analysis,
+            "processing_time_ms": f"{result.processing_time_ms:.1f}",
+            "model": "PaliGemma-3B (Colab)",
+            "cost": "$0.00"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Compression analysis error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/upload-source")
 @limiter.limit("5/minute")
