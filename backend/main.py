@@ -2,6 +2,8 @@ from fastapi import FastAPI, File, UploadFile, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict
 import os
+import uuid
+import pathlib
 import requests
 import json
 import base64
@@ -62,7 +64,10 @@ async def upload_source(request: Request, asset_id: str, uploader: str, file: Up
     
     Also registers asset hashes in Redis for Layer 2 comparison.
     """
-    filepath = f"/tmp/media/{file.filename}"
+    # Fixed: sanitize filename to prevent path traversal attacks.
+    # Original file.filename is untrusted input and could contain "../../" sequences.
+    safe_name = f"{uuid.uuid4()}{pathlib.Path(file.filename).suffix}"
+    filepath = f"/tmp/media/{safe_name}"
     with open(filepath, "wb") as buffer:
         buffer.write(await file.read())
         
@@ -99,13 +104,15 @@ async def upload_source(request: Request, asset_id: str, uploader: str, file: Up
     if frames:
         hashes = compute_phash_for_frames(frames)
         if hashes and len(hashes) > 0:
-            # Store the first frame's hash as representative
-            dhash = hashes[0].get("dhash")
-            ahash = hashes[0].get("ahash")
-            
+            # Fixed: use the median frame as the representative hash.
+            # The first frame is often a blank/black intro and produces a poor fingerprint.
+            mid = len(hashes) // 2
+            dhash = hashes[mid].get("dhash")
+            ahash = hashes[mid].get("ahash")
+
             if dhash and ahash:
                 store_asset_hashes(asset_id, dhash, ahash)
-                print(f"✓ Registered asset {asset_id} hashes in Redis")
+                print(f"✓ Registered asset {asset_id} median-frame hashes in Redis")
     
     # Publish event for Layer 2 processing (event-driven mechanism)
     event_queue.publish_asset_uploaded_event(
@@ -431,11 +438,18 @@ async def run_automated_pipeline(video_filename: str, asset_id: str = None, osin
         print("\n" + "="*60)
         print("AUTOMATED PIPELINE: Escalating to Layer 2.5 PaliGemma")
         print("="*60)
-        
-        frame_dir = f"/tmp/media/frames_{asset_id or 'temp'}"
+
+        # Fixed: use the resolved asset_id that run_complete_triage used internally
+        # so the frame directory path is always consistent.
+        # run_complete_triage derives asset_id as md5(filepath)[:12] when none is given.
+        import hashlib as _hl
+        resolved_id = asset_id or _hl.md5(filepath.encode()).hexdigest()[:12]
+        frame_dir = f"/tmp/media/frames_{resolved_id}"
+        if not os.path.isdir(frame_dir):
+            return {"error": f"Frame directory not found: {frame_dir}. Run /api/triage first."}
         frame_paths = sorted([
-            os.path.join(frame_dir, f) 
-            for f in os.listdir(frame_dir) 
+            os.path.join(frame_dir, f)
+            for f in os.listdir(frame_dir)
             if f.endswith('.jpg')
         ])
         

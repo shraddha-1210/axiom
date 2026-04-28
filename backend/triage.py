@@ -11,6 +11,9 @@ This module implements:
 """
 
 import os
+import uuid
+import struct
+import base64
 import imagehash
 from PIL import Image
 import ffmpeg
@@ -255,30 +258,53 @@ def compute_audio_fingerprint(audio_path: str) -> Optional[Dict]:
 def compare_audio_fingerprints(fp1: str, fp2: str) -> float:
     """
     Compares two Chromaprint fingerprints and returns similarity score.
-    
+
+    Fixed: Chromaprint fingerprints are base64-encoded arrays of 32-bit
+    integers.  The previous implementation split on ',' (a comma), which
+    produces meaningless single-character tokens and always returns ~0.
+
+    Correct approach: decode each fingerprint to an int32 array, XOR
+    corresponding elements, count matching bits, and express as a ratio
+    of total bits (bit-level Jaccard similarity on the overlapping prefix).
+
     Args:
-        fp1: First fingerprint string
-        fp2: Second fingerprint string
-    
+        fp1: Base64-encoded Chromaprint fingerprint string
+        fp2: Base64-encoded Chromaprint fingerprint string
+
     Returns:
         Similarity score between 0.0 and 1.0
     """
-    # Simple comparison: count matching segments
-    # In production, use proper Chromaprint comparison algorithm
     if not fp1 or not fp2:
         return 0.0
-    
-    # Convert fingerprints to sets of segments for comparison
-    segments1 = set(fp1.split(',')[:100])  # First 100 segments
-    segments2 = set(fp2.split(',')[:100])
-    
-    if not segments1 or not segments2:
+
+    try:
+        # Chromaprint base64 uses standard alphabet with possible padding
+        def _decode(fp: str) -> list:
+            # Add padding if needed
+            padded = fp + "=" * (4 - len(fp) % 4) if len(fp) % 4 else fp
+            raw = base64.b64decode(padded)
+            n = len(raw) // 4
+            return list(struct.unpack(f"{n}I", raw[:n * 4]))
+
+        ints1 = _decode(fp1)
+        ints2 = _decode(fp2)
+
+        # Compare only the overlapping prefix
+        compare_len = min(len(ints1), len(ints2), 120)  # ~4s of audio coverage
+        if compare_len == 0:
+            return 0.0
+
+        matching_bits = 0
+        total_bits = compare_len * 32
+        for i in range(compare_len):
+            differing = bin(ints1[i] ^ ints2[i]).count('1')
+            matching_bits += 32 - differing
+
+        return matching_bits / total_bits
+
+    except Exception as e:
+        print(f"✗ Audio fingerprint comparison error: {e}")
         return 0.0
-    
-    intersection = len(segments1 & segments2)
-    union = len(segments1 | segments2)
-    
-    return intersection / union if union > 0 else 0.0
 
 
 # ============================================================================
@@ -287,19 +313,26 @@ def compare_audio_fingerprints(fp1: str, fp2: str) -> float:
 
 def is_duplicate_hash(hsh: str) -> bool:
     """
-    Checks if a hash exists in Redis cache (indicates previously seen content).
-    
+    Checks if a hash exists in the **scan-dedup** Redis namespace.
+
+    Fixed: uses the 'scanphash:' prefix instead of 'phash:' to avoid
+    namespace collision with registered-asset keys ('asset:id:dhash').
+    Previously, re-scanning the same video would always show cache hits
+    because 'phash:{hash}' was populated on the first run and then matched
+    on subsequent runs, producing false duplicate signals unrelated to any
+    protected registered asset.
+
     Args:
         hsh: Hash string to check
-    
+
     Returns:
-        True if hash exists in cache, False otherwise
+        True if hash exists in scan-dedup cache, False otherwise
     """
     if not r or not hsh:
         return False
-    
+
     try:
-        return r.exists(f"phash:{hsh}") > 0
+        return r.exists(f"scanphash:{hsh}") > 0
     except Exception as e:
         print(f"✗ Redis check error: {e}")
         return False
@@ -307,8 +340,8 @@ def is_duplicate_hash(hsh: str) -> bool:
 
 def cache_hash(hsh: str, hash_type: str = "dhash", ttl: int = 2592000):
     """
-    Stores a hash in Redis cache with TTL (default: 30 days).
-    
+    Stores a hash in the scan-dedup Redis namespace with TTL (default: 30 days).
+
     Args:
         hsh: Hash string to cache
         hash_type: Type of hash (dhash, ahash, audio)
@@ -316,9 +349,10 @@ def cache_hash(hsh: str, hash_type: str = "dhash", ttl: int = 2592000):
     """
     if not r or not hsh:
         return
-    
+
     try:
-        key = f"phash:{hsh}"
+        # Fixed: use 'scanphash:' namespace (separate from 'asset:id:dhash')
+        key = f"scanphash:{hsh}"
         r.setex(key, ttl, hash_type)
     except Exception as e:
         print(f"✗ Redis cache error: {e}")
@@ -367,10 +401,17 @@ def get_registered_asset_hashes() -> List[Dict]:
         return []
 
 
+# 1 year TTL for registered protected-asset hashes.
+_ASSET_HASH_TTL = 60 * 60 * 24 * 365
+
+
 def store_asset_hashes(asset_id: str, dhash: str, ahash: str, audio_fp: Optional[str] = None):
     """
     Stores registered asset hashes in Redis for future comparisons.
-    
+
+    Fixed: added 1-year TTL to prevent unbounded Redis memory growth on
+    the Upstash free tier. Previously these keys had no expiry.
+
     Args:
         asset_id: Unique identifier for the asset
         dhash: Difference hash value
@@ -379,16 +420,16 @@ def store_asset_hashes(asset_id: str, dhash: str, ahash: str, audio_fp: Optional
     """
     if not r:
         return
-    
+
     try:
-        r.set(f"asset:{asset_id}:dhash", dhash)
-        r.set(f"asset:{asset_id}:ahash", ahash)
-        
+        r.setex(f"asset:{asset_id}:dhash", _ASSET_HASH_TTL, dhash)
+        r.setex(f"asset:{asset_id}:ahash", _ASSET_HASH_TTL, ahash)
+
         if audio_fp:
-            r.set(f"asset:{asset_id}:audio_fp", audio_fp)
-        
-        print(f"✓ Stored hashes for asset {asset_id}")
-        
+            r.setex(f"asset:{asset_id}:audio_fp", _ASSET_HASH_TTL, audio_fp)
+
+        print(f"✓ Stored hashes for asset {asset_id} (TTL: 1 year)")
+
     except Exception as e:
         print(f"✗ Error storing asset hashes: {e}")
 
@@ -532,9 +573,10 @@ def run_complete_triage(video_path: str, asset_id: str = None) -> TriageResult:
     print(f"LAYER 2 TRIAGE: {os.path.basename(video_path)}")
     print(f"{'='*60}")
     
-    # Generate unique ID for this analysis
+    # Generate unique ID for this analysis.
+    # Fixed: replaced MD5 with uuid4 — MD5 is deprecated for security-sensitive use.
     if not asset_id:
-        asset_id = hashlib.md5(video_path.encode()).hexdigest()[:12]
+        asset_id = uuid.uuid4().hex[:12]
     
     # Step 1: Extract keyframes
     frame_dir = f"/tmp/media/frames_{asset_id}"
