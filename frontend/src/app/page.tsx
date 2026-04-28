@@ -2,21 +2,21 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Search, FileText, Activity, Link2, Download, TerminalSquare, Moon, Sun, LogOut, RefreshCw, AlertTriangle, CheckCircle, Zap, Shield } from 'lucide-react';
+import { Search, FileText, Activity, Link2, Download, TerminalSquare, Moon, Sun, LogOut, RefreshCw, AlertTriangle, CheckCircle, Zap, Shield, Database, Server } from 'lucide-react';
 
 /* ─── Nav Config ─────────────────────────────────────────────────────────── */
 const NAV_ITEMS = [
   { key: 'command_center', label: 'Overview', icon: <Activity size={15} />, shortcut: '⌘1' },
   { key: 'interrogation', label: 'Triage Sandbox', icon: <Search size={15} />, shortcut: '⌘2' },
   { key: 'provenance', label: 'Audit Ledger', icon: <FileText size={15} />, shortcut: '⌘3' },
-  { key: 'scrapers', label: 'Pipeline Hooks', icon: <Link2 size={15} />, shortcut: '⌘4' },
+  { key: 'ingestion', label: 'Input Sources', icon: <Database size={15} />, shortcut: '⌘4' },
 ];
 
 const MODULE_NAMES: Record<string, string> = {
   command_center: 'Command Center',
   interrogation: 'Deep Interrogation',
   provenance: 'Provenance Ledger',
-  scrapers: 'Pipeline Settings',
+  ingestion: 'Input Sources',
 };
 
 /* ─── Interfaces ─────────────────────────────────────────────────────────── */
@@ -164,14 +164,43 @@ function EnterpriseDashboard({ onLogout, theme, setTheme, analystEmail }: {
   const [wafError, setWafError] = useState('');
   const [manifestData, setManifestData] = useState<any>(null);
   const [latency, setLatency] = useState('...');
-  const [feedRows, setFeedRows] = useState<FeedRow[]>(MOCK_FEED);
+  const [feedRows, setFeedRows] = useState<FeedRow[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [actionBarError, setActionBarError] = useState('');
   const [actionBarDisabled, setActionBarDisabled] = useState(false);
   const [workerStatuses, setWorkerStatuses] = useState<WorkerStatus[]>(INITIAL_WORKERS);
-  const [provenanceRecords] = useState<ProvenanceRecord[]>(MOCK_PROVENANCE);
+  const [provenanceRecords, setProvenanceRecords] = useState<ProvenanceRecord[]>([]);
   const [provenancePage, setProvenancePage] = useState(1);
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+  const [kpis, setKpis] = useState({ volumeIndexed: 0, cacheIntercepts: 0, criticalIncidents: 0 });
+
+  const fetchDashboardData = async () => {
+    try {
+      const [kpiRes, feedRes, provRes] = await Promise.all([
+        fetch('http://localhost:8000/api/dashboard/kpis'),
+        fetch('http://localhost:8000/api/dashboard/feed'),
+        fetch('http://localhost:8000/api/dashboard/provenance')
+      ]);
+      if (kpiRes.ok) {
+        const kpiData = await kpiRes.json();
+        setKpis({
+          volumeIndexed: kpiData.volume_indexed,
+          cacheIntercepts: kpiData.cache_intercepts,
+          criticalIncidents: kpiData.critical_incidents
+        });
+      }
+      if (feedRes.ok) setFeedRows(await feedRes.json());
+      if (provRes.ok) setProvenanceRecords(await provRes.json());
+    } catch (e) {
+      console.error('Failed to fetch dashboard data:', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchDashboardData();
+    const interval = setInterval(fetchDashboardData, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => { setActionBarError(''); setActionBarDisabled(false); }, [selectedAsset]);
 
@@ -206,7 +235,7 @@ function EnterpriseDashboard({ onLogout, theme, setTheme, analystEmail }: {
       const data = await res.json();
       if (res.status === 429) { setWafError('WAF Blocked: Rate Limit Exceeded'); setUploadState('error'); }
       else if (res.status === 403) { setWafError(`WAF Blocked: ${data.detail}`); setUploadState('error'); }
-      else if (res.ok) { setManifestData(data.manifest); setUploadState('success'); }
+      else if (res.ok) { setManifestData(data.manifest); setUploadState('success'); fetchDashboardData(); }
       else { setWafError(data.error || 'Server Error'); setUploadState('error'); }
     } catch { setWafError('Network Error'); setUploadState('error'); }
   };
@@ -217,6 +246,7 @@ function EnterpriseDashboard({ onLogout, theme, setTheme, analystEmail }: {
       const res = await fetch(`http://localhost:8000/api/scrapers/trigger?platform=${workerId}`);
       if (res.ok) {
         setWorkerStatuses(p => p.map(w => w.id === workerId ? { ...w, loading: false, status: 'ACTIVE', lastRun: new Date().toISOString().replace('T', ' ').slice(0, 19) } : w));
+        fetchDashboardData();
       } else {
         const d = await res.json().catch(() => ({}));
         setWorkerStatuses(p => p.map(w => w.id === workerId ? { ...w, loading: false, status: 'ERROR', error: d.detail || d.error || `Error ${res.status}` } : w));
@@ -278,10 +308,10 @@ function EnterpriseDashboard({ onLogout, theme, setTheme, analystEmail }: {
         </div>
 
         <div className="content-scroll">
-          {activeTab === 'command_center' && <CommandCenterTab feedRows={feedRows} setFeedRows={setFeedRows} latency={latency} uploadState={uploadState} wafError={wafError} manifestData={manifestData} handleUpload={handleUpload} onRowClick={(row) => { setSelectedAsset(row); setActiveTab('interrogation'); }} />}
+          {activeTab === 'command_center' && <CommandCenterTab feedRows={feedRows} fetchDashboardData={fetchDashboardData} latency={latency} kpis={kpis} onRowClick={(row) => { setSelectedAsset(row); setActiveTab('interrogation'); }} />}
           {activeTab === 'interrogation' && <InterrogationTab selectedAsset={selectedAsset} actionBarError={actionBarError} actionBarDisabled={actionBarDisabled} setActionBarError={setActionBarError} setActionBarDisabled={setActionBarDisabled} setSelectedAsset={setSelectedAsset} />}
           {activeTab === 'provenance' && <ProvenanceTab provenanceRecords={provenanceRecords} provenancePage={provenancePage} setProvenancePage={setProvenancePage} expandedRowId={expandedRowId} setExpandedRowId={setExpandedRowId} />}
-          {activeTab === 'scrapers' && <ScrapersTab workerStatuses={workerStatuses} invokeWorker={invokeWorker} />}
+          {activeTab === 'ingestion' && <IngestionTab workerStatuses={workerStatuses} invokeWorker={invokeWorker} uploadState={uploadState} wafError={wafError} manifestData={manifestData} handleUpload={handleUpload} />}
         </div>
       </main>
     </div>
@@ -289,10 +319,9 @@ function EnterpriseDashboard({ onLogout, theme, setTheme, analystEmail }: {
 }
 
 /* ─── Command Center Tab ─────────────────────────────────────────────────── */
-function CommandCenterTab({ feedRows, setFeedRows, latency, uploadState, wafError, manifestData, handleUpload, onRowClick }: {
-  feedRows: FeedRow[]; setFeedRows: (r: FeedRow[]) => void; latency: string;
-  uploadState: string; wafError: string; manifestData: any;
-  handleUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+function CommandCenterTab({ feedRows, fetchDashboardData, latency, kpis, onRowClick }: {
+  feedRows: FeedRow[]; fetchDashboardData: () => void; latency: string;
+  kpis: { volumeIndexed: number; cacheIntercepts: number; criticalIncidents: number };
   onRowClick: (row: FeedRow) => void;
 }) {
   return (
@@ -305,15 +334,15 @@ function CommandCenterTab({ feedRows, setFeedRows, latency, uploadState, wafErro
       <div className="kpi-grid">
         <div className="kpi-card">
           <div className="kpi-label">Volume Indexed (24h)</div>
-          <div className="kpi-value">14,290</div>
+          <div className="kpi-value">{kpis.volumeIndexed.toLocaleString()}</div>
         </div>
         <div className="kpi-card">
           <div className="kpi-label">Cache Intercepts</div>
-          <div className="kpi-value">1,902</div>
+          <div className="kpi-value">{kpis.cacheIntercepts.toLocaleString()}</div>
         </div>
         <div className="kpi-card kpi-card-accent">
           <div className="kpi-label">Critical Incidents</div>
-          <div className="kpi-value kpi-value-danger">47</div>
+          <div className="kpi-value kpi-value-danger">{kpis.criticalIncidents.toLocaleString()}</div>
         </div>
         <div className="kpi-card">
           <div className="kpi-label">System Latency</div>
@@ -321,11 +350,11 @@ function CommandCenterTab({ feedRows, setFeedRows, latency, uploadState, wafErro
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: '1.25rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '1.25rem' }}>
         <div className="panel">
           <div className="panel-header">
             <span className="panel-header-title"><Zap size={14} style={{ color: 'var(--accent)' }} />Pipeline Event Feed</span>
-            <button className="btn-secondary" onClick={() => setFeedRows([...MOCK_FEED])} style={{ gap: '0.3rem' }}>
+            <button className="btn-secondary" onClick={fetchDashboardData} style={{ gap: '0.3rem' }}>
               <RefreshCw size={12} />Refresh
             </button>
           </div>
@@ -351,33 +380,6 @@ function CommandCenterTab({ feedRows, setFeedRows, latency, uploadState, wafErro
               ))}
             </tbody>
           </table>
-        </div>
-
-        <div className="panel">
-          <div className="panel-header">
-            <span className="panel-header-title"><Download size={14} style={{ color: 'var(--accent)' }} />Direct Escalation</span>
-          </div>
-          <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            <label className="upload-box">
-              <input type="file" style={{ display: 'none' }} onChange={handleUpload} accept="video/mp4,video/avi" />
-              <div className="upload-icon-wrap">
-                <Download size={18} />
-              </div>
-              <div style={{ fontSize: '0.825rem', fontWeight: 600, color: 'var(--text-main)' }}>
-                {uploadState === 'uploading' ? 'Analyzing via WAF...' : 'Upload Suspicious Asset'}
-              </div>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '0.25rem' }}>MP4 / AVI · max 50MB</div>
-            </label>
-            {uploadState === 'error' && (
-              <div className="alert alert-error"><AlertTriangle size={14} />{wafError}</div>
-            )}
-            {uploadState === 'success' && manifestData && (
-              <div className="alert alert-success">
-                <CheckCircle size={14} />
-                <div>WAF passed. Manifest: <strong>{manifestData.signature_info?.issuer || manifestData.claim_generator}</strong></div>
-              </div>
-            )}
-          </div>
         </div>
       </div>
     </motion.div>
@@ -588,25 +590,85 @@ function ProvenanceTab({ provenanceRecords, provenancePage, setProvenancePage, e
   );
 }
 
-/* ─── Scrapers Tab ───────────────────────────────────────────────────────── */
-function ScrapersTab({ workerStatuses, invokeWorker }: { workerStatuses: WorkerStatus[]; invokeWorker: (id: string) => void }) {
+/* ─── Ingestion Tab ───────────────────────────────────────────────────────── */
+function IngestionTab({ workerStatuses, invokeWorker, uploadState, wafError, manifestData, handleUpload }: {
+  workerStatuses: WorkerStatus[]; invokeWorker: (id: string) => void;
+  uploadState: string; wafError: string; manifestData: any;
+  handleUpload: (e: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
-          <h1 className="page-title">Pipeline Settings</h1>
-          <p className="page-subtitle">Scraper fleet management and dispatch controls.</p>
+          <h1 className="page-title">Input Sources</h1>
+          <p className="page-subtitle">Manage automated scrapers, database integrations, and manual file uploads.</p>
         </div>
         <button className="btn-primary" onClick={() => INITIAL_WORKERS.forEach(w => invokeWorker(w.id))}>
           <Zap size={13} /> Invoke All Scrapers
         </button>
       </div>
 
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1.5rem', marginBottom: '1.5rem' }}>
+        {/* DB Connection Source */}
+        <div className="panel">
+          <div className="panel-header">
+            <span className="panel-header-title"><Server size={14} style={{ color: 'var(--accent)' }} />Database Sync</span>
+            <StatusBadge status="ACTIVE" />
+          </div>
+          <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div>
+              <div className="kpi-label">Connection String</div>
+              <div style={{ fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>postgresql://neondb...</div>
+            </div>
+            <button className="btn-secondary" disabled style={{ justifyContent: 'center' }}>
+              <RefreshCw size={12} /> Sync in Progress
+            </button>
+          </div>
+        </div>
+
+        {/* Manual Upload */}
+        <div className="panel" style={{ gridColumn: 'span 2' }}>
+          <div className="panel-header">
+            <span className="panel-header-title"><Download size={14} style={{ color: 'var(--accent)' }} />Direct Escalation (Video Upload)</span>
+          </div>
+          <div style={{ padding: '1.25rem', display: 'flex', gap: '2rem' }}>
+            <label className="upload-box" style={{ flex: 1, cursor: 'pointer' }}>
+              <input type="file" style={{ display: 'none' }} onChange={handleUpload} accept="video/mp4,video/avi" />
+              <div className="upload-icon-wrap" style={{ margin: '0 auto 0.75rem' }}>
+                <Download size={18} />
+              </div>
+              <div style={{ fontSize: '0.825rem', fontWeight: 600, color: 'var(--text-main)', textAlign: 'center' }}>
+                {uploadState === 'uploading' ? 'Analyzing via Layer 1 WAF...' : 'Upload Suspicious Asset'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-subtle)', marginTop: '0.25rem', textAlign: 'center' }}>MP4 / AVI · max 50MB</div>
+            </label>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+              {uploadState === 'idle' && (
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Uploads undergo immediate heuristic triage (Layer 2) and cryptographic signing.</div>
+              )}
+              {uploadState === 'error' && (
+                <div className="alert alert-error"><AlertTriangle size={14} />{wafError}</div>
+              )}
+              {uploadState === 'success' && manifestData && (
+                <div className="alert alert-success">
+                  <CheckCircle size={14} />
+                  <div>WAF passed. Manifest: <strong>{manifestData.signature_info?.issuer || manifestData.claim_generator}</strong></div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="page-header" style={{ marginTop: '2rem', marginBottom: '1rem' }}>
+        <h2 style={{ fontSize: '1.1rem', fontWeight: 500, letterSpacing: '-0.01em' }}>Social Media Scraper Fleet</h2>
+      </div>
+
       <div className="worker-grid">
         {workerStatuses.map(worker => (
           <div key={worker.id} className="panel">
             <div className="panel-header">
-              <span className="panel-header-title">{worker.name}</span>
+              <span className="panel-header-title"><Link2 size={14} style={{ color: 'var(--accent)' }} /> {worker.name}</span>
               <StatusBadge status={worker.status} />
             </div>
             <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
