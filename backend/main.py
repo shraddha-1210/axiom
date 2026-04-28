@@ -10,7 +10,7 @@ import base64
 
 from provenance import c2pa_engine
 from triage import (
-    extract_keyframes, 
+    extract_keyframes,
     compute_phash_for_frames,
     run_complete_triage,
     store_asset_hashes,
@@ -21,6 +21,8 @@ from gemini_interrogator import analyze_video_frames_for_fraud
 from scrapers import orchestrator
 from event_queue import event_queue
 from sandbox_detonator import run_zeroday_sandbox
+from layer3_orchestrator import run_layer3_interrogation
+from vertex_embedder import generate_multimodal_embedding, store_embedding_with_metadata
 
 from database import SessionLocal, AssetRecord, IncidentRecord
 import vector_store
@@ -93,9 +95,19 @@ async def upload_source(request: Request, asset_id: str, uploader: str, file: Up
     finally:
         db.close()
     
-    # Mocking Semantic Embedding Generation for Layer 3a
-    mock_embedding = [0.1] * 1408
-    vector_store.store_embedding(asset_id, mock_embedding)
+    # Generate real Vertex AI multimodal embedding for Layer 3 search
+    frame_dir_for_embed = f"/tmp/media/frames_{asset_id}"
+    embed_frames = sorted([
+        os.path.join(frame_dir_for_embed, f)
+        for f in os.listdir(frame_dir_for_embed)
+        if f.endswith(".jpg")
+    ]) if os.path.isdir(frame_dir_for_embed) else []
+    embedding_result = generate_multimodal_embedding(embed_frames, text_context=uploader)
+    vector_store.store_embedding_with_metadata(
+        asset_id,
+        embedding_result.embedding,
+        {"owner": uploader, "model": embedding_result.model_used}
+    )
     
     # Layer 2: Register asset hashes in Redis for future comparisons
     frame_dir = f"/tmp/media/frames_{asset_id}"
@@ -242,34 +254,24 @@ def run_sandbox(filename: str):
 
 @app.post("/api/interrogate")
 def interrogate(asset_id: str, context: str = ""):
-    """Layer 3 - Gemini: Interrogation and logging incidents into Neon DB."""
-    # Find nearest vector via Pinecone
-    nearest = vector_store.search_nearest_assets([0.1]*1408)
-    
-    gemini_result = analyze_video_frames_for_fraud([], source_context=context)
-    
-    classification = gemini_result.get("classification", "UNKNOWN")
-    confidence = gemini_result.get("confidence", "0.0")
-    
-    db = SessionLocal()
-    try:
-        incident = IncidentRecord(
-            incident_id=f"inc_{os.urandom(4).hex()}",
-            asset_id=asset_id,
-            classification=classification,
-            confidence=str(confidence),
-            gemini_report=gemini_result,
-            action_taken=gemini_result.get("recommended_action", "REVIEW")
-        )
-        db.add(incident)
-        db.commit()
-    except Exception as e:
-        print(f"NeonDB Error: {e}")
-        db.rollback()
-    finally:
-        db.close()
-
-    return {"message": "Interrogation Logged", "gemini_report": gemini_result, "nearest_sematic_match": nearest}
+    """Layer 3 - Full Gemini interrogation + Pinecone search + NeonDB incident logging."""
+    filepath_hint = f"/tmp/media/{asset_id}"
+    result = run_layer3_interrogation(
+        filepath=filepath_hint,
+        asset_id=asset_id,
+        triage_context={"osint_caption": context},
+    )
+    return {
+        "message": "Layer 3 Interrogation Complete",
+        "classification": result.classification,
+        "confidence": f"{result.confidence * 100:.1f}%",
+        "recommended_action": result.recommended_action,
+        "forensic_signals": result.forensic_signals,
+        "modifications_detected": result.modifications_detected,
+        "nearest_semantic_matches": result.nearest_matches,
+        "incident_id": result.incident_id,
+        "total_cost": f"${result.total_cost:.6f}",
+    }
 
 @app.get("/api/scrapers/trigger")
 def run_scrapers(background_tasks: BackgroundTasks):
@@ -487,62 +489,49 @@ async def run_automated_pipeline(video_filename: str, asset_id: str = None, osin
     else:
         escalate_to_layer3 = False
     
-    # LAYER 3: Gemini Interrogation
+    # LAYER 3: Gemini Interrogation via full orchestrator
     if escalate_to_layer3:
         print("\n" + "="*60)
-        print("AUTOMATED PIPELINE: Escalating to Layer 3 Gemini")
+        print("AUTOMATED PIPELINE: Escalating to Layer 3")
         print("="*60)
-        
-        # Find nearest vector via Pinecone
-        nearest = vector_store.search_nearest_assets([0.1]*1408)
-        
-        # Run Gemini interrogation
-        context = osint_context.get("caption", "") if osint_context else ""
-        gemini_result = analyze_video_frames_for_fraud([], source_context=context)
-        
-        classification = gemini_result.get("classification", "UNKNOWN")
-        confidence = gemini_result.get("confidence", "0.0")
-        layer3_cost = 0.10  # Average cost
-        total_cost += layer3_cost
-        
-        # Log incident in NeonDB
-        db = SessionLocal()
-        try:
-            incident = IncidentRecord(
-                incident_id=f"inc_{os.urandom(4).hex()}",
-                asset_id=asset_id or "unknown",
-                classification=classification,
-                confidence=str(confidence),
-                gemini_report=gemini_result,
-                action_taken=gemini_result.get("recommended_action", "REVIEW")
-            )
-            db.add(incident)
-            db.commit()
-        except Exception as e:
-            print(f"NeonDB Error: {e}")
-            db.rollback()
-        finally:
-            db.close()
-        
+
+        triage_ctx = {
+            "hamming_distance": triage_result.hamming_distance,
+            "visual_similarity": triage_result.visual_similarity,
+            "audio_match": triage_result.audio_match,
+            "osint_piracy_intent": (osint_context or {}).get("piracy_intent", 0.0),
+            "platform": (osint_context or {}).get("platform", "unknown"),
+            "osint_caption": (osint_context or {}).get("caption", ""),
+        }
+
+        layer3_result = run_layer3_interrogation(
+            filepath=filepath,
+            asset_id=asset_id or "unknown",
+            triage_context=triage_ctx,
+        )
+        total_cost += layer3_result.total_cost
+
         pipeline_log.append({
             "layer": "Layer 3 - Gemini Interrogation",
-            "decision": classification,
-            "cost": layer3_cost,
+            "decision": layer3_result.classification,
+            "cost": layer3_result.total_cost,
             "details": {
-                "confidence": confidence,
-                "recommended_action": gemini_result.get("recommended_action"),
-                "nearest_match": nearest
+                "confidence": f"{layer3_result.confidence * 100:.1f}%",
+                "recommended_action": layer3_result.recommended_action,
+                "forensic_signals": layer3_result.forensic_signals,
+                "nearest_match": layer3_result.nearest_matches[:1],
+                "incident_id": layer3_result.incident_id,
             }
         })
-        
+
         return {
-            "message": f"LAYER 3 COMPLETE: {classification}",
-            "action": gemini_result.get("recommended_action", "REVIEW"),
-            "classification": classification,
-            "confidence": confidence,
+            "message": f"LAYER 3 COMPLETE: {layer3_result.classification}",
+            "action": layer3_result.recommended_action,
+            "classification": layer3_result.classification,
+            "confidence": f"{layer3_result.confidence * 100:.1f}%",
+            "forensic_signals": layer3_result.forensic_signals,
             "total_cost": f"${total_cost:.6f}",
             "pipeline_log": pipeline_log,
-            "gemini_report": gemini_result
         }
     
     return {
@@ -551,3 +540,68 @@ async def run_automated_pipeline(video_filename: str, asset_id: str = None, osin
         "pipeline_log": pipeline_log
     }
 
+
+@app.post("/api/layer3")
+async def run_layer3(
+    video_filename: str,
+    asset_id: str = None,
+    osint_context: Dict = None,
+):
+    """
+    Layer 3 — Deep Semantic Interrogation (dedicated endpoint).
+
+    Runs the complete Layer 3 pipeline on an already-uploaded video file:
+      1. Vertex AI multimodal embedding generation
+      2. Pinecone nearest-neighbour search
+      3. Gemini 1.5 Pro Vision forensic frame analysis
+      4. NeonDB incident logging
+
+    Args:
+        video_filename: Filename of the video in /tmp/media/
+        asset_id:       Optional tracking ID (generated if not provided)
+        osint_context:  Optional OSINT signals dict:
+                        {caption, platform, piracy_intent, hamming_distance, etc.}
+
+    Returns:
+        Full Layer3Result as JSON.
+    """
+    filepath = f"/tmp/media/{video_filename}"
+    if not os.path.exists(filepath):
+        return {"error": f"File not found: {video_filename}. Upload it first via /api/upload-source."}
+
+    import uuid as _uuid
+    resolved_id = asset_id or _uuid.uuid4().hex[:12]
+
+    ctx = osint_context or {}
+    # Derive frame paths if they already exist from a prior triage run
+    frame_dir = f"/tmp/media/frames_{resolved_id}"
+    frame_paths = sorted([
+        os.path.join(frame_dir, f)
+        for f in os.listdir(frame_dir)
+        if f.endswith(".jpg")
+    ]) if os.path.isdir(frame_dir) else []
+
+    result = run_layer3_interrogation(
+        filepath=filepath,
+        asset_id=resolved_id,
+        frame_paths=frame_paths or None,
+        triage_context=ctx,
+    )
+
+    return {
+        "message": f"Layer 3 Complete: {result.classification}",
+        "asset_id": resolved_id,
+        "classification": result.classification,
+        "confidence": f"{result.confidence * 100:.1f}%",
+        "recommended_action": result.recommended_action,
+        "forensic_signals": result.forensic_signals,
+        "modifications_detected": result.modifications_detected,
+        "nearest_semantic_matches": result.nearest_matches,
+        "vector_similarity": f"{result.vector_similarity_score:.3f}",
+        "incident_id": result.incident_id,
+        "cost_breakdown": {
+            "embedding": f"${result.embedding_cost:.6f}",
+            "gemini": f"${result.gemini_cost:.6f}",
+            "total": f"${result.total_cost:.6f}",
+        },
+    }

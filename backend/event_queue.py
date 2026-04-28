@@ -484,7 +484,23 @@ class Layer2EventHandler:
         
         elif decision == "ESCALATE_VERTEX":
             print(f"\n[Event] Escalating {asset_id} directly to Layer 3 Gemini")
-            # This would trigger Layer 3 processing
+            filepath = event_data.get("filepath", "")
+            if filepath and os.path.exists(filepath):
+                try:
+                    from layer3_orchestrator import run_layer3_interrogation
+                    triage_ctx = {
+                        "hamming_distance": event_data.get("hamming_distance", 64),
+                        "visual_similarity": event_data.get("similarity", 0.0),
+                        "audio_match": False,
+                        "osint_piracy_intent": 0.0,
+                        "platform": event_data.get("platform", "unknown"),
+                    }
+                    result = run_layer3_interrogation(filepath, asset_id, triage_context=triage_ctx)
+                    print(f"✓ Layer 3 complete: {result.classification} (action={result.recommended_action})")
+                except Exception as exc:
+                    print(f"✗ Layer 3 escalation failed for {asset_id}: {exc}")
+            else:
+                print(f"⚠ filepath missing or not found for {asset_id}, skipping Layer 3")
             
         elif decision == "BLOCK":
             print(f"\n[Event] Asset {asset_id} BLOCKED - automated takedown initiated")
@@ -498,11 +514,29 @@ class Layer2EventHandler:
         asset_id = event_data["asset_id"]
         decision = event_data["decision"]
         confidence_score = event_data["confidence_score"]
-        
+
         if decision == "ESCALATE_LAYER3":
             print(f"\n[Event] Escalating {asset_id} to Layer 3 Gemini (confidence: {confidence_score})")
-            # This would trigger Layer 3 Gemini processing
-            
+            filepath = event_data.get("filepath", "")
+            if filepath and os.path.exists(filepath):
+                try:
+                    from layer3_orchestrator import run_layer3_interrogation
+                    triage_ctx = {
+                        "hamming_distance": event_data.get("hamming_distance", 64),
+                        "visual_similarity": event_data.get("visual_similarity", 0.0),
+                        "audio_match": event_data.get("audio_match", False),
+                        "osint_piracy_intent": event_data.get("osint_piracy_intent", 0.0),
+                        "platform": event_data.get("platform", "unknown"),
+                        "osint_caption": event_data.get("osint_caption", ""),
+                        "paligemma_confidence": confidence_score,
+                    }
+                    result = run_layer3_interrogation(filepath, asset_id, triage_context=triage_ctx)
+                    print(f"✓ Layer 3 complete: {result.classification} (action={result.recommended_action})")
+                except Exception as exc:
+                    print(f"✗ Layer 3 escalation failed for {asset_id}: {exc}")
+            else:
+                print(f"⚠ filepath missing or not found for {asset_id}, skipping Layer 3")
+
         elif decision == "ARCHIVE":
             print(f"\n[Event] Asset {asset_id} ARCHIVED - low confidence score ({confidence_score})")
 

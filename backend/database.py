@@ -1,25 +1,22 @@
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 from sqlalchemy import create_engine, Column, String, DateTime, Text, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-# Try current directory first, then parent directory
+# Load environment variables from .env file (current dir then parent)
 env_path = Path('.env')
 if not env_path.exists():
     env_path = Path('../.env')
-
 load_dotenv(dotenv_path=env_path)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Handle missing DATABASE_URL or PostgreSQL connection issues
 if not DATABASE_URL:
     print("⚠ DATABASE_URL not set, using SQLite fallback")
     DATABASE_URL = "sqlite:///./axiom.db"
 elif DATABASE_URL.startswith("postgresql://"):
-    # Try PostgreSQL, fallback to SQLite if psycopg2 not available
     try:
         import psycopg2
         print("✓ Using PostgreSQL database")
@@ -31,24 +28,32 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
 class AssetRecord(Base):
     __tablename__ = "assets"
-    
+
     id = Column(String, primary_key=True, index=True)
     owner_id = Column(String, index=True)
     c2pa_manifest = Column(JSON)
-    registered_at = Column(DateTime)
+    registered_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     file_hash = Column(String, unique=True, index=True)
+    # Layer 3 — Pinecone cross-reference
+    embedding_id = Column(String, nullable=True, index=True)
+
 
 class IncidentRecord(Base):
     __tablename__ = "incidents"
-    
+
     incident_id = Column(String, primary_key=True, index=True)
     asset_id = Column(String, index=True)
     classification = Column(String)
-    confidence = Column(String) # Float converted to string for ease
-    gemini_report = Column(JSON)
+    confidence = Column(String)          # stored as string for portability
+    gemini_report = Column(JSON)         # full structured Gemini output
     action_taken = Column(String)
+    # Layer 3 additions
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    layer3_signals = Column(JSON, nullable=True)  # ForensicSignals dict
 
-# Initialize schema
+
+# Additive schema migration — create_all is safe: adds new columns, never drops existing ones
 Base.metadata.create_all(bind=engine)

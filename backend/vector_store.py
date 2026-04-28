@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -32,30 +33,82 @@ if PINECONE_AVAILABLE and api_key:
 else:
     print("⚠ Pinecone not configured, vector operations will be disabled")
 
-def store_embedding(asset_id: str, embedding: list):
+
+def store_embedding(asset_id: str, embedding: List[float]):
+    """Bare upsert — no metadata. Kept for backward compatibility."""
+    if not vector_store:
+        return
+    try:
+        vector_store.upsert(vectors=[{"id": asset_id, "values": embedding}])
+    except Exception as e:
+        print(f"⚠ Error storing embedding: {e}")
+
+
+def store_embedding_with_metadata(
+    asset_id: str,
+    embedding: List[float],
+    metadata: Optional[Dict] = None,
+):
+    """
+    Upserts an embedding into Pinecone with optional metadata for filtered search.
+
+    Args:
+        asset_id:  Pinecone vector ID.
+        embedding: 1408-dimensional float vector.
+        metadata:  Dict with classification, confidence, platform, etc.
+    """
     if not vector_store:
         return
     try:
         vector_store.upsert(
-            vectors=[
-                {"id": asset_id, "values": embedding}
-            ]
+            vectors=[{
+                "id": asset_id,
+                "values": embedding,
+                "metadata": metadata or {},
+            }]
         )
     except Exception as e:
-        print(f"⚠ Error storing embedding: {e}")
+        print(f"⚠ Error storing embedding with metadata: {e}")
 
-def search_nearest_assets(embedding: list, top_k: int = 5):
+
+def search_nearest_assets(
+    embedding: List[float],
+    top_k: int = 5,
+    filter_metadata: Optional[Dict] = None,
+) -> List[Dict]:
+    """
+    Queries Pinecone for the nearest asset vectors.
+
+    Args:
+        embedding:       Query vector (1408 dims).
+        top_k:           Number of results to return.
+        filter_metadata: Optional Pinecone metadata filter dict.
+
+    Returns:
+        List of {"id": str, "score": float} dicts.
+    """
     if not vector_store:
         return []
     try:
-        result = vector_store.query(
-            vector=embedding,
-            top_k=top_k,
-            include_values=False
-        )
-        matches = result.get('matches', [])
-        # Serialize to prevent FastAPI RecursionError on Pinecone object representation
-        return [{"id": getattr(m, "id", str(m)), "score": getattr(m, "score", 0.0)} for m in matches]
+        query_kwargs = {
+            "vector": embedding,
+            "top_k": top_k,
+            "include_values": False,
+            "include_metadata": True,
+        }
+        if filter_metadata:
+            query_kwargs["filter"] = filter_metadata
+
+        result = vector_store.query(**query_kwargs)
+        matches = result.get("matches", [])
+        return [
+            {
+                "id": getattr(m, "id", str(m)),
+                "score": getattr(m, "score", 0.0),
+                "metadata": getattr(m, "metadata", {}),
+            }
+            for m in matches
+        ]
     except Exception as e:
         print(f"⚠ Error searching vectors: {e}")
         return []
