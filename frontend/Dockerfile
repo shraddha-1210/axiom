@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-# RUN npm install # Uncomment when package.json is initialized
+RUN npm install
 
 # Copy the rest of the application files
 COPY . .
@@ -17,7 +17,4 @@ COPY . .
 EXPOSE 3000
 
 # Start the Next.js development server
-# CMD ["npm", "run", "dev"] # Uncomment when Next.js app is generated
-
-# Temporary command to keep the container running until Next.js app is set up
-CMD ["tail", "-f", "/dev/null"]
+CMD ["npm", "run", "dev"]
